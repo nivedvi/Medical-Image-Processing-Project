@@ -1,0 +1,206 @@
+clc;clear;close all;
+
+% a)
+
+% creating a binary video of the bottom wall
+m_mode = VideoReader("m_mode.mp4");
+vid = read(m_mode);
+[m,n,~,k] = size(vid);
+bin_vid = false(m,n,k);
+for i = 1:k
+    frame = vid(:,:,:,i);
+    [LV,~] = isolateLV(frame,'y');
+    bin_vid(:,:,i) = logical(LV);
+end
+
+implay(bin_vid)
+
+% Isolating the refresher line
+modified_bin_vid = zeros(m,n-99,k);
+for i = 1:k
+    bin_frame = bin_vid(:,:,i);
+    bin_frame = imopen(bin_frame,strel('cube',3));
+    bin_frame = (bin_frame(:,50:end-50)); % slicing out the scale and edges
+    modified_bin_vid(:,:,i) = bin_frame;
+    whiteCounts = sum(bin_frame, 1);
+    minWhiteCount = min(whiteCounts);
+    columnsToChange = whiteCounts == minWhiteCount;
+    newBinaryImage = false(size(bin_frame));
+    newBinaryImage(:, columnsToChange) = 1;
+    modified_bin_vid(:,:,i) = newBinaryImage;
+end
+fps = m_mode.FrameRate;
+time_between_frames = 1/fps;
+white_cols_1 = find(modified_bin_vid(1,:,1) == 1);
+white_cols_2 = find(modified_bin_vid(1,:,2) == 1);
+pixel_distance = mean(white_cols_2) - mean(white_cols_1);
+pixel_time_frame = pixel_distance/time_between_frames; %calculating pixels/second
+
+% HR calculation
+signals = LV2signal(bin_vid,'FromTop'); % Acquiring a signal by sweeping the image
+bpms = zeros(1,k);
+for i = 1:k
+    signal = signals(:,:,1);
+    filt_sig = filter(ones(1,10)/10,1,signal);
+    [pks,locs] = findpeaks(filt_sig,MinPeakDistance=pixel_time_frame);
+    interval = locs(2)-locs(1);
+    bpm = interval*60/pixel_time_frame;
+    bpms(i) = bpm;
+end
+ave_bpm = mean(bpms);
+fprintf('HR = %.2f [BPM]\n',ave_bpm);
+
+
+%%
+
+bin_vid_2 = zeros(m,n,k);
+widths = zeros(1,k);
+for i = 1:k
+    frame = vid(:,:,:,i);
+%     imshow(frame)
+    [LV,width] = isolateLV(frame,'area'); % Binary video of the divide 
+    widths(1,i) = width; % minor region axis in pixels
+    bin_vid_2(:,:,i) = LV;
+end
+implay(bin_vid_2)
+ave_width = mean(widths);
+
+% Extraction of the scale
+bin_frame = imopen(bin_vid(:,:,1),strel('square',4));
+imshow(bin_frame);
+half_frame = bin_frame(:,n/2:end); % Assuming scale on the right side
+columnSum = sum(half_frame,1);
+scale_indices = find(columnSum==0) + n-length(columnSum);
+scale = vid(:,scale_indices,:,1);
+bin_scale = imbinarize(rgb2gray(scale));
+% imshow(bin_scale)
+scale_ticks_stats = regionprops(bin_scale,'Centroid');
+y_ticks = [scale_ticks_stats.Centroid];  %Centroid-based distance
+y_ticks = sort(y_ticks(2:2:end));
+tick_spacing =mean(diff(y_ticks));
+width_cm = 0.5*ave_width/tick_spacing;
+fprintf('The width of the Chamber Divide is %.2f [cm]\n',width_cm)
+
+%% Functions
+
+function [LV, width] = isolateLV(image,prop)
+    gray_image = rgb2gray(image);
+    T = multithresh(gray_image,8);
+    seg_image = segmentT(gray_image,T);
+    bin_image = false(size(gray_image));
+
+    bin_image(seg_image>(1)) = true; 
+    
+%     imshow(bin_image)
+       
+    if prop == 'y'
+        stats = regionprops(bin_image,'Area','Centroid','PixelIdxList','MinorAxisLength');
+        areas = [stats.Area]; mean_area = mean(areas); 
+        largest_idx = areas>mean_area; %Extraction of Large regions
+        stats = stats(largest_idx);
+        centroids = [stats.Centroid];
+        y_positions = (centroids(2:2:end)); %assuming the chamber wall is the lowest large region
+        [~,y_indices_sorted] = sort(y_positions,"descend");
+        stats = stats(y_indices_sorted(1));
+    elseif prop == 'area'
+        bin_image = imfill(imclose(bin_image,strel('disk',2)),'holes');
+%         imshow(bin_image)
+        stats = regionprops(bin_image,'Area','Centroid','PixelIdxList','MinorAxisLength');
+        areas = [stats.Area]; mean_area = mean(areas);
+        largest_idx = areas>mean_area;
+        stats = stats(largest_idx);
+        centroids = [stats.Centroid];
+        y_positions = (centroids(2:2:end)); %assuming the chamber divide is the second lowest large
+        [~,y_indices_sorted] =sort(y_positions,'descend');
+        stats = stats(y_indices_sorted(2));
+
+        
+    end
+    
+    modified_frame = false(size(bin_image));
+    width = stats(1).MinorAxisLength;
+    
+    modified_frame(stats(1).PixelIdxList) = true;
+%     imshow(modified_frame)
+    LV = modified_frame;
+end
+
+function mean_distance = FindPeaksTime(bin_vid)
+    [~,~,k] = size(bin_vid);
+    distances = zeros(1,k);
+    for i = 1:k
+        frame = bin_vid(:,:,i);
+        row_white_count = sum(frame,2);
+        new_count = row_white_count(row_white_count>0);
+        idx = find(row_white_count == min(new_count));
+        min_peak_separation = false;
+        while ~min_peak_separation
+            row = frame(idx,:);
+            row_whites = find(row == 1);
+            center = round(mean(row_whites));
+%             if row(center+1) == 1 && row(center-1) == 1
+            if ~ismember(center,row_whites)
+                idx = idx+1;
+            else
+                min_peak_separation = true;
+            end
+        end
+        mean_left = mean(row_white_count(row_white_count<center));
+        mean_right = mean(row_white_count(row_white_count>=center));
+        distance = abs(mean_right-mean_left);
+        distances(1,i) = distance;
+    end
+    mean_distance = mean(distances(~isnan(distances)));
+   
+end
+
+function [seg_image,levels] = segmentT(image,T)
+    thresh = [T,255];
+    n = length(thresh);
+    levels = 1:n;
+    seg_image = zeros(size(image));
+    for i = 1:n-1
+        seg_image(image >= thresh(i) & image < thresh(i+1)) = levels(i);
+    end 
+    
+end
+
+function signals = LV2signal(LV, sweepDirection)
+    % Validate the sweepDirection input
+    if nargin < 2
+        sweepDirection = 'FromTop'; % Default to 'FromTop' if not specified
+    end
+    
+    % Validate input argument
+    if ~ismember(sweepDirection, {'FromTop', 'FromBottom'})
+        error('Invalid sweep direction. Choose either "FromTop" or "FromBottom".');
+    end
+
+    [m,n,k] = size(LV);
+    signals = zeros(1,n,k);
+    
+    for i = 1:k
+        signal = signals(:,:,i);
+        frame = LV(:,:,i);
+
+        % Determine the sweep order based on the direction
+        if strcmp(sweepDirection, 'FromTop')
+            rowOrder = 1:m;
+        elseif strcmp(sweepDirection, 'FromBottom')
+            rowOrder = m:-1:1;
+        end
+
+        % Construct the signal
+        for j = rowOrder
+            indices = find(frame(j,:) == 1);
+            indices = indices(signal(1,indices)==0);
+            if strcmp(sweepDirection, 'FromTop')
+                signal(1,indices) = m-j;  % FromTop
+            elseif strcmp(sweepDirection, 'FromBottom')
+                signal(1,indices) = m-j;    % FromBottom
+            end
+        end
+
+        signals(:,:,i) = signal;
+    end
+end
